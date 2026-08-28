@@ -35,7 +35,7 @@ PRIORITIES = ("low", "medium", "high", "urgent")
 AUTHOR_TYPES = ("human", "agent")
 MAX_BODY_BYTES = 1_048_576
 MAX_ARTIFACT_BYTES = 10 * 1_048_576
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     position REAL NOT NULL DEFAULT 1024,
     claimed_by TEXT NOT NULL DEFAULT '',
     claimed_at TEXT,
+    archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -149,6 +150,8 @@ class Taskboard:
                     raise RuntimeError(
                         "Unsupported database schema; start with a fresh taskboard database"
                     )
+                if "archived" not in columns:
+                    connection.execute("ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))")
             connection.executescript(SCHEMA)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
@@ -158,7 +161,7 @@ class Taskboard:
     def health(self) -> Dict[str, Any]:
         with self.connect() as connection:
             connection.execute("SELECT 1").fetchone()
-            count = connection.execute("SELECT count(*) FROM tasks").fetchone()[0]
+            count = connection.execute("SELECT count(*) FROM tasks WHERE archived = 0").fetchone()[0]
         return {"status": "ok", "database": "ok", "active_tasks": count, "time": utc_now()}
 
     def _artifact_path(self, raw_path: Any, require_exists: bool = False) -> Path:
@@ -233,6 +236,7 @@ class Taskboard:
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> Dict[str, Any]:
         task = dict(row)
+        task["archived"] = bool(task["archived"])
         try:
             task["labels"] = json.loads(task.pop("labels_json"))
         except (TypeError, json.JSONDecodeError):
@@ -245,6 +249,11 @@ class Taskboard:
         parameters: List[Any] = []
         status = query.get("status", [""])[0]
         claim = query.get("claim", [""])[0]
+        include_archived = query.get("include_archived", [""])[0].lower()
+        if include_archived not in {"", "0", "1", "true", "false", "yes", "no"}:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "include_archived must be true or false")
+        if include_archived not in {"1", "true", "yes"}:
+            clauses.append("t.archived = 0")
         search = query.get("q", [""])[0].strip()
         if status:
             if status not in STATUSES:
@@ -312,6 +321,11 @@ class Taskboard:
             values["priority"] = priority
         if creating or "labels" in body:
             values["labels_json"] = json.dumps(clean_labels(body.get("labels")), separators=(",", ":"))
+        if creating or "archived" in body:
+            archived = body.get("archived", False)
+            if not isinstance(archived, bool):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "archived must be a boolean")
+            values["archived"] = int(archived)
         if "position" in body:
             try:
                 position = float(body["position"])
@@ -323,7 +337,7 @@ class Taskboard:
         return values
 
     def create_task(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        allowed = {"title", "description", "status", "priority", "labels", "position", "actor"}
+        allowed = {"title", "description", "status", "priority", "labels", "position", "archived", "actor"}
         unknown = set(body) - allowed
         if unknown:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"unknown fields: {', '.join(sorted(unknown))}")
@@ -347,7 +361,7 @@ class Taskboard:
         return self.get_task(task_id)
 
     def update_task(self, task_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
-        allowed = {"title", "description", "status", "priority", "labels", "position", "actor", "version"}
+        allowed = {"title", "description", "status", "priority", "labels", "position", "archived", "actor", "version"}
         unknown = set(body) - allowed
         if unknown:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"unknown fields: {', '.join(sorted(unknown))}")

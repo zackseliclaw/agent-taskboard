@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -193,6 +194,60 @@ class TaskboardIntegrationTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as forbidden:
             self.request("/api/tasks", "POST", {"title": "No header"}, client_header=False)
         self.assertEqual(403, forbidden.exception.code)
+
+    def test_archived_tasks_are_filtered_and_archive_is_optimistic_update(self):
+        task = self.create_task("Keep history")
+        _, _, created_archived = self.request(
+            "/api/tasks", "POST", {"title": "Hidden history", "archived": True}
+        )
+        archived = created_archived["task"]
+        self.assertFalse(task["archived"])
+        self.assertTrue(archived["archived"])
+        _, _, listing = self.request("/api/tasks")
+        self.assertEqual([task["id"]], [item["id"] for item in listing["tasks"]])
+        _, _, included = self.request("/api/tasks?include_archived=true")
+        self.assertEqual({task["id"], archived["id"]}, {item["id"] for item in included["tasks"]})
+        _, _, updated = self.request(
+            f"/api/tasks/{task['id']}", "PATCH",
+            {"archived": True, "version": task["version"], "actor": "test"},
+        )
+        self.assertTrue(updated["task"]["archived"])
+        self.assertEqual(task["version"] + 1, updated["task"]["version"])
+        with self.assertRaises(HTTPError) as conflict:
+            self.request(f"/api/tasks/{task['id']}", "PATCH", {"archived": False, "version": task["version"]})
+        self.assertEqual(409, conflict.exception.code)
+        _, _, activity = self.request(f"/api/tasks/{task['id']}/activity")
+        self.assertEqual("updated", activity["activity"][0]["action"])
+        self.assertEqual({"archived": 1}, activity["activity"][0]["details"])
+        _, _, restored = self.request(
+            f"/api/tasks/{task['id']}", "PATCH",
+            {"archived": False, "version": updated["task"]["version"]},
+        )
+        self.assertFalse(restored["task"]["archived"])
+
+    def test_archived_column_migrates_without_losing_existing_data(self):
+        db_path = Path(self.temp.name) / "legacy.db"
+        now = "2026-01-01T00:00:00Z"
+        connection = sqlite3.connect(db_path)
+        connection.executescript("""
+            CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'backlog',
+              priority TEXT NOT NULL DEFAULT 'medium', labels_json TEXT NOT NULL DEFAULT '[]',
+              position REAL NOT NULL DEFAULT 1024, claimed_by TEXT NOT NULL DEFAULT '',
+              claimed_at TEXT, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL);
+            CREATE TABLE task_activity (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
+              action TEXT NOT NULL, actor TEXT NOT NULL DEFAULT '', details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
+            CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
+              author TEXT NOT NULL, author_type TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        """)
+        connection.execute("INSERT INTO tasks(title, created_at, updated_at) VALUES (?, ?, ?)", ("Legacy", now, now))
+        connection.commit(); connection.close()
+        migrated = Taskboard(db_path, Path(self.temp.name) / "legacy-artifacts")
+        task = migrated.get_task(1)
+        self.assertFalse(task["archived"])
+        self.assertEqual("Legacy", task["title"])
+        self.assertIn("archived", {row[1] for row in migrated.connect().execute("PRAGMA table_info(tasks)")})
 
 if __name__ == "__main__":
     unittest.main()

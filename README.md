@@ -103,6 +103,15 @@ curl -sS -X PATCH http://localhost:7778/api/tasks/1 \
   -d '{"status":"in_progress","version":2,"actor":"elb-cp"}'
 ```
 
+Tasks include an `archived` boolean (default `false`). Archive or restore a task
+with the normal optimistic-concurrency update, for example:
+
+```bash
+curl -sS -X PATCH http://localhost:7778/api/tasks/1 \
+  -H 'Content-Type: application/json' -H 'X-Taskboard-Client: 1' \
+  -d '{"archived":true,"version":3,"actor":"zack"}'
+```
+
 ### Add comments
 
 Both humans and agents can add Markdown comments:
@@ -125,7 +134,7 @@ Use `author_type` value `human` or `agent`.
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/api/health` | Health and task count |
-| GET, POST | `/api/tasks` | List or create tasks |
+| GET, POST | `/api/tasks` | List or create tasks; GET excludes archived tasks by default |
 | GET, PATCH, DELETE | `/api/tasks/{id}` | Read, update, or permanently delete a task |
 | POST | `/api/tasks/{id}/claim` | Atomically claim a task |
 | POST | `/api/tasks/{id}/release` | Release an agent claim |
@@ -137,6 +146,12 @@ Use `author_type` value `human` or `agent`.
 | GET | `/artifacts/view/{path}` | Open a stable sandboxed artifact URL |
 
 Deletion is permanent and cascades to comments and activity. The UI requires confirmation.
+
+`GET /api/tasks` accepts `include_archived=true` (also `1` or `yes`) to include
+archived tasks. `include_archived=false` (the default) returns only active tasks.
+Individual `GET /api/tasks/{id}` URLs always return the task, including archived
+tasks, so stable task links remain valid. Archive changes increment `version` and
+are recorded in task activity like other updates.
 
 ## Artifacts
 

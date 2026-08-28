@@ -30,6 +30,7 @@
       <div class="toolbar">
         <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Search tasks, Markdown, labels, and claims"></label>
         <label><span class="sr-only">Filter by claim state</span><select id="claim-filter"><option value="">All claims</option><option value="unclaimed">Unclaimed</option><option value="claimed">Claimed</option></select></label>
+        <label class="checkbox-filter"><input id="include-archived" type="checkbox"> Include archived</label>
         <div id="board-summary" class="summary"></div>
       </div>
       <div id="board" class="board" aria-live="polite"></div>
@@ -54,6 +55,7 @@
           <div class="task-actions">
             <button id="copy-task-link" class="button secondary">Copy URL</button>
             <button id="edit-task" class="button secondary">Edit</button>
+            <button id="archive-task" class="button secondary">Archive task</button>
             <button id="delete-task" class="button danger">Delete task</button>
           </div>
         </div>

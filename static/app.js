@@ -158,6 +158,19 @@
     });
   }
 
+  async function toggleArchiveTask() {
+    const task = state.currentTask;
+    if (!task) return;
+    const archived = !task.archived;
+    try {
+      const payload = await api(`/api/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ archived, version: task.version, actor: "web-ui" }) });
+      state.currentTask = payload.task;
+      toast(archived ? "Task archived" : "Task restored");
+      await loadTasks();
+      renderTaskDetail();
+    } catch (error) { toast(error.message, true); }
+  }
+
   function buildCard(task) {
     const card = document.createElement("a");
     card.className = `task-card priority-${task.priority}`;
@@ -319,6 +332,7 @@
     [status, `${task.priority} priority`, `Updated ${formatTime(task.updated_at)}`].forEach((value, index) => {
       const item = document.createElement("span"); item.className = index < 2 ? `meta-pill ${index === 1 ? task.priority : ""}` : "meta-time"; item.textContent = value; $("#detail-meta").append(item);
     });
+    $("#archive-task").textContent = task.archived ? "Restore task" : "Archive task";
     const labels = $("#detail-labels"); labels.replaceChildren();
     task.labels.forEach((value) => { const label = document.createElement("span"); label.className = "label"; label.textContent = value; labels.append(label); });
     const claimState = $("#claim-state"); claimState.replaceChildren();
@@ -553,7 +567,7 @@
   }
 
   async function loadTasks() {
-    const payload = await api("/api/tasks");
+    const payload = await api(`/api/tasks${$("#include-archived").checked ? "?include_archived=true" : ""}`);
     state.tasks = payload.tasks;
     renderBoard();
   }
@@ -591,10 +605,12 @@
     $("#refresh-artifacts").addEventListener("click", () => loadArtifacts().then(() => toast("Artifacts refreshed")).catch((error) => toast(error.message, true)));
     $("#search").addEventListener("input", renderBoard);
     $("#claim-filter").addEventListener("change", renderBoard);
+    $("#include-archived").addEventListener("change", loadTasks);
     $("#artifact-search").addEventListener("input", renderArtifacts);
     $("#task-form").addEventListener("submit", saveTask);
     $("#edit-task").addEventListener("click", () => state.currentTask && openEditor(state.currentTask));
     $("#delete-task").addEventListener("click", deleteCurrentTask);
+    $("#archive-task").addEventListener("click", toggleArchiveTask);
     $("#claim-form").addEventListener("submit", claimCurrentTask);
     $("#release-claim").addEventListener("click", releaseCurrentTask);
     $("#comment-form").addEventListener("submit", addComment);
