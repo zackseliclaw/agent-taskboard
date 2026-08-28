@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Agent Taskboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <button class="brand route-button" data-route="/" aria-label="Open board">
+      <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span><strong>Agent Taskboard</strong><small>Local work queue</small></span>
+    </button>
+    <nav class="tabs" aria-label="Main navigation">
+      <button class="tab active" data-route="/">Board</button>
+      <button class="tab" data-route="/artifacts">Artifacts <span id="artifact-count" class="count-pill">0</span></button>
+    </nav>
+    <div class="header-actions">
+      <span id="health" class="health"><span></span>Connecting</span>
+      <button id="refresh" class="button secondary" title="Refresh data">↻</button>
+      <button id="new-task" class="button primary">+ New task</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="board-view" class="view active">
+      <div class="toolbar">
+        <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Search tasks, Markdown, labels, and claims"></label>
+        <label><span class="sr-only">Filter by claim state</span><select id="claim-filter"><option value="">All claims</option><option value="unclaimed">Unclaimed</option><option value="claimed">Claimed</option></select></label>
+        <div id="board-summary" class="summary"></div>
+      </div>
+      <div id="board" class="board" aria-live="polite"></div>
+    </section>
+
+    <section id="artifacts-view" class="view">
+      <div class="artifact-page">
+        <div class="page-heading">
+          <div><span class="eyebrow">Filesystem output</span><h2>Artifacts</h2><p>Each HTML file has a stable URL and opens as a standalone page.</p></div>
+          <button id="refresh-artifacts" class="button secondary">Refresh</button>
+        </div>
+        <label class="search artifact-search"><span>⌕</span><input id="artifact-search" type="search" placeholder="Filter artifacts"></label>
+        <div id="artifact-list" class="artifact-grid"></div>
+        <div class="artifact-help">Agents create self-contained <code>.html</code> files under the artifacts directory. Put an artifact URL directly in a task’s Markdown description or a comment to refer to it.</div>
+      </div>
+    </section>
+
+    <section id="task-view" class="view">
+      <div class="task-page">
+        <div class="task-page-toolbar">
+          <button class="text-button route-button" data-route="/">← Back to board</button>
+          <div class="task-actions">
+            <button id="copy-task-link" class="button secondary">Copy URL</button>
+            <button id="edit-task" class="button secondary">Edit</button>
+            <button id="delete-task" class="button danger">Delete task</button>
+          </div>
+        </div>
+        <div id="task-loading" class="page-state">Loading task…</div>
+        <div id="task-content" class="hidden">
+          <article class="task-detail">
+            <div class="detail-heading">
+              <div>
+                <span id="detail-id" class="eyebrow"></span>
+                <h1 id="detail-title"></h1>
+                <div id="detail-meta" class="detail-meta"></div>
+              </div>
+              <div id="detail-labels" class="labels detail-labels"></div>
+            </div>
+            <section class="claim-panel">
+              <div id="claim-state"></div>
+              <form id="claim-form" class="claim-form">
+                <input id="claim-agent" maxlength="100" required placeholder="Agent identity">
+                <button class="button primary" type="submit">Claim task</button>
+              </form>
+              <button id="release-claim" class="button secondary hidden" type="button">Release claim</button>
+            </section>
+            <section class="description-section">
+              <h2>Description</h2>
+              <div id="detail-description" class="markdown-body"></div>
+            </section>
+          </article>
+
+          <section class="comments-section">
+            <div class="comments-heading"><div><h2>Comments</h2><p>Humans and agents can leave Markdown updates.</p></div><span id="comment-count" class="count-pill">0</span></div>
+            <div id="comments-list" class="comments-list"></div>
+            <form id="comment-form" class="comment-form">
+              <label><span>Comment <small>Markdown supported</small></span><textarea id="comment-body" rows="5" required placeholder="Add context, progress, questions, or a handoff…"></textarea></label>
+              <div class="comment-submit"><button class="button primary" type="submit">Add comment</button></div>
+            </form>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="task-dialog">
+    <form id="task-form">
+      <div class="dialog-heading">
+        <div><span id="dialog-eyebrow" class="eyebrow">New work item</span><h2 id="dialog-title">Create task</h2></div>
+        <button type="button" class="icon-button close-dialog" aria-label="Close">×</button>
+      </div>
+      <input id="task-id" type="hidden">
+      <input id="task-version" type="hidden">
+      <div class="form-grid">
+        <label class="full"><span>Title</span><input id="task-title" maxlength="300" required placeholder="What needs to be done?"></label>
+        <label><span>Status</span><select id="task-status"></select></label>
+        <label><span>Priority</span><select id="task-priority"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+        <label class="full"><span>Labels</span><input id="task-labels" placeholder="backend, investigation, ai"></label>
+        <label class="full"><span>Description <small>Markdown supported</small></span><textarea id="task-description" rows="14" placeholder="# Context&#10;&#10;Describe the task, useful links, expected outcome, and anything an agent needs to know."></textarea></label>
+      </div>
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="button" class="button secondary close-dialog">Cancel</button>
+        <button type="submit" class="button primary">Save task</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+</body>
+</html>
