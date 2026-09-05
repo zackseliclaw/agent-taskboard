@@ -3,65 +3,83 @@ name: agent-taskboard
 description: Load this skill whenever an agent needs to create, claim, execute, comment on, review, move, complete, or delete Agent Taskboard work; coordinate using the taskboard; or troubleshoot the local taskboard service and API.
 ---
 
-## Authoritative Flow
+## Connection and Configuration
 
-1. Resolve the repository root two directories above this skill directory. All source paths below are relative to that root. Read `README.md`:
-   - Use **Coordination workflow** to determine the next action and which role owns it.
-   - Use **Agent API** for current request bodies, concurrency behavior, and endpoint paths.
-   - Use **Artifacts** for the current filesystem and URL workflow.
-2. Determine your role:
-   - The agent explicitly designated as **taskmaster** follows the taskmaster steps in the README and owns creation, decomposition, dispatch, ambiguity, all status transitions, independent review, acceptance, and claim cleanup.
-   - Every other execution agent is a **worker** unless the user explicitly says otherwise. Workers claim under their own identity, perform work, and report through comments; they do not move statuses.
-3. Before claiming a task or posting a comment, choose an agent name unique to your worker instance and use that same name for claims and comments throughout the task. Concurrent workers must not share a bare agent name.
-4. Read current state through the HTTP API before writing. For task updates, use the returned `version`; never guess it. Do not read or modify SQLite directly.
-5. Perform exactly the role-appropriate action from README **Coordination workflow**. Use Markdown comments for starts, progress, blockers, review feedback, and completion evidence.
-6. When acting as taskmaster:
-   - Review every expected result independently against primary evidence. An unanswered central question, a failed required build, or an unapproved scope reduction blocks acceptance even when the handoff is polished.
-   - Before cleaning up a stale claim, independently verify whether the worker process is still running, whether it posted a `## Ready for review` handoff, and whether that handoff meets the task's acceptance criteria. A dead worker's handoff is not by itself sufficient to move the task to **Done**.
-7. If producing visual output, create the HTML file according to README **Artifacts**, refresh/discover its stable URL, and include that URL in a task comment.
-8. Read the API response and confirm the intended state. Treat HTTP 409 as a real claim/version conflict: refresh state and coordinate rather than overriding another agent.
-9. Never delete a task, comment, or artifact unless the user explicitly requested deletion. Completion means the taskmaster moves the task to **Done**.
+Resolve the repository root two directories above this skill directory. Paths below are relative to that root. Use the service URL supplied with the task; otherwise inspect `taskboard.ini`, environment overrides, and the installed systemd unit for the effective host and port. Defaults are `http://localhost:7778`. For a local service bound to `0.0.0.0`, connect through `localhost`.
+
+Settings are loaded once at startup. CLI arguments override environment variables, which override INI and built-in defaults. Supported overrides are `--host` / `TASKBOARD_HOST`, `--port` / `TASKBOARD_PORT`, `--db` / `TASKBOARD_DB`, and `--display-name` / `TASKBOARD_DISPLAY_NAME`. Artifact storage is fixed at `artifacts/`.
+
+Read `GET /api/health` to check availability and `GET /api/config` for statuses, ambiguity levels, human identity, and model mappings. Use your own agent identity rather than the configured human display name.
+
+## Coordination Workflow
+
+The designated taskmaster owns task creation, decomposition, dispatch, ambiguity, status transitions, independent review, acceptance, and stale-claim cleanup. Other execution agents act as workers unless the user directs otherwise. Workers claim their own work and report through comments; they do not move statuses.
+
+1. The taskmaster creates or refines a task in **Backlog**, providing context, constraints, expected results, and relevant URLs in its Markdown description.
+2. Once executable, the taskmaster moves it to **Ready** and dispatches its stable `/tasks/{id}` URL using the model-routing rules below.
+3. The worker reads the task, claims it atomically under a name unique to its worker instance, and posts a start comment using that same identity. Keep the identity consistent throughout the task. Never claim for another worker or share a bare identity between concurrent workers.
+4. The taskmaster observes the claim and moves the task to **In progress**. Each task has one active worker; create separate tasks when coordinating multiple workers.
+5. The worker performs the work and posts progress, blockers, and output links in Markdown comments.
+6. On finishing, the worker posts a `## Ready for review` handoff with a result summary, validation evidence, and output URLs, then explicitly releases its claim. A release does not constitute acceptance.
+7. The taskmaster moves the task to **Review** and independently checks every expected result against primary evidence. Unanswered central questions, failed required builds, and unapproved scope reductions block acceptance. If changes are needed, post actionable feedback, return the task to **In progress**, and have the worker reclaim it before resuming. If accepted, post the review outcome and move it to **Done**.
+8. Before clearing a stale claim, verify whether the worker process still runs, whether it posted a handoff, and whether the deliverables meet acceptance criteria. An inactive worker or a handoff alone does not justify marking work Done. A coordinating or cron agent may clear a verified stale claim.
+
+Comments should be self-contained
+
+Read current API state before writes and confirm the returned result afterward. For task updates, send the returned `version`; never guess it. HTTP 409 means a claim or version conflict: refresh state and coordinate, without overriding another active worker. Do not read or modify SQLite directly.
+
+Never delete tasks, comments, or artifacts unless the user explicitly requests deletion. Normal completion uses Done.
 
 ## Ambiguity and Model Assignment
 
-Ambiguity is a model-routing field with values `low`, `medium`, `high`, and `very_high`. Set the level according to the level-to-model mapping and dispatch that model. Do not invent a separate definition of ambiguity based on task wording.
+Ambiguity is a model-routing field with values `low`, `medium`, `high`, and `very_high`. Set the level according to how vague the task is. Do not invent a separate definition of ambiguity based on task wording.
 
-Read `GET /api/config` and look up `models[task.ambiguity]` before dispatch. The mapping is configured in `[models]` in `taskboard.toml`. If that entry is empty or missing, omit the model override and inherit the agent runner's default; do not ask for a model choice or pass an empty model identifier. Otherwise, pass the configured model identifier as the override. Record the selected model in the dispatch comment, or record "runner default" if the resolved model is unavailable. Existing tasks with `ambiguity: null` are unassessed; set a level before dispatch. New tasks require an explicit level. The taskmaster owns ambiguity changes and model assignment.
+Read `GET /api/config` and look up `models[task.ambiguity]` before dispatch. The mapping is configured in `[models]` in `taskboard.ini`. If that entry is empty or missing, omit the model override and inherit the agent runner's default; do not ask for a model choice or pass an empty model identifier. Otherwise, pass the configured model identifier as the override. Record the selected model in the dispatch comment, or record "runner default" if the resolved model is unavailable. Existing tasks with `ambiguity: null` are unassessed; set a level before dispatch. New tasks require an explicit level. The taskmaster owns ambiguity changes and model assignment.
 
-## Sources of Truth
+## API Requests
 
-### Workflow and API Usage
-- **Source:** `README.md`
-- **Look for:** `Coordination workflow`, `Agent API`, `Endpoints`, and `Artifacts`.
-- **Use:** Follow the numbered lifecycle and copy current API shapes from this file rather than from this skill.
+All writes require `Content-Type: application/json` and `X-Taskboard-Client: 1`. The custom header blocks browser cross-origin form writes; it is not authentication. Send JSON objects. Unknown body fields are rejected.
 
-### API, Validation, and Database Schema
-- **Source:** `taskboard.py`
-- **Look for:** `SCHEMA`, `Taskboard`, and `TaskboardHandler`.
-- **Use:** Resolve ambiguity about accepted fields, validation, claim atomicity, comment activity, deletion behavior, HTTP status codes, and routes.
+The following bodies illustrate request shapes; replace identities, IDs, and versions with current values.
 
-### Browser Behavior
-- **Sources:**
-  - `static/index.html`
-  - `static/app.js`
-- **Look for:** routed task URLs, Markdown rendering, web identity, claim controls, comments, and artifact actions.
-- **Use:** Consult these only for UI behavior; use the backend for API authority.
+| Action | Method and path | JSON body |
+|---|---|---|
+| Create task | POST `/api/tasks` | `{"title":"Investigate deployment","description":"Context and expected results","status":"backlog","ambiguity":"high","labels":["deployment"],"actor":"coordinator-unique"}` |
+| Update task | PATCH `/api/tasks/{id}` | `{"status":"in_progress","version":2,"actor":"coordinator-unique"}` |
+| Claim | POST `/api/tasks/{id}/claim` | `{"agent":"worker-unique","actor":"worker-unique"}` |
+| Release own claim | POST `/api/tasks/{id}/release` | `{"agent":"worker-unique","actor":"worker-unique"}` |
+| Clear verified stale claim | POST `/api/tasks/{id}/release` | `{"force":true,"actor":"coordinator-unique"}` |
+| Add comment | POST `/api/tasks/{id}/comments` | `{"author":"worker-unique","author_type":"agent","body":"Markdown progress or handoff"}` |
+| Edit comment | PATCH `/api/comments/{id}` | `{"body":"Updated Markdown","editor":"worker-unique","editor_type":"agent"}` |
 
-### Runtime Configuration
-- **Source:** `systemd/agent-taskboard.service`
-- **Look for:** `ExecStart`, writable directories, user, and restart policy.
-- **Use:** Derive the current host/port and filesystem permissions. Check service health with systemd before diagnosing API failures.
+New tasks require a title and ambiguity: `low`, `medium`, `high`, or `very_high`. Status values are `backlog`, `ready`, `in_progress`, `review`, and `done`. Task updates may also change title, description, labels, ambiguity, or numeric position. Responses wrap the result as `task` or `comment`; tasks include a stable `url`.
 
-### Tests
-- **Source:** `tests/test_taskboard.py`
-- **Look for:** end-to-end examples of creation, claim conflicts, release, comments, editing/deletion, stable URLs, artifacts, and optimistic version checks.
-- **Use:** Consult when request/response semantics remain unclear after reading the README and backend.
+Claims are exclusive and atomic. Repeating a claim with the same identity is idempotent; a different claimant receives HTTP 409. Claims and releases increment the task version when they change state, so refetch before subsequent task updates.
 
-## Guardrails
+| Method | Endpoint | Result |
+|---|---|---|
+| GET | `/api/health` | Service/database health and task count |
+| GET | `/api/config` | Effective identity, model mapping, statuses, ambiguity levels, author types |
+| GET | `/api/tasks` | `tasks` list; filters: `status`, `claim` (claimed, unclaimed, or identity), `q` |
+| GET | `/api/tasks/{id}` | `task` details |
+| GET | `/api/tasks/{id}/comments` | `comments` in chronological order |
+| GET | `/api/tasks/{id}/activity` | Latest `activity` records |
+| GET | `/api/artifacts` | Discovered `artifacts` with stable URLs |
+| GET | `/artifacts/view/{path}` | Sandboxed HTML report |
+| DELETE | `/api/tasks/{id}` | Permanently delete task and its comments/activity |
+| DELETE | `/api/comments/{id}` | Permanently delete comment |
+| DELETE | `/api/artifacts/{path}` | Permanently delete HTML file |
 
-- Do not impersonate a worker by claiming with another agent's identity.
-- Do not bypass a conflicting claim; communicate through a comment or ask the taskmaster.
-- Do not store artifact HTML in task descriptions, comments, or SQLite. Store the file in the configured artifact directory and reference its stable URL.
-- Do not put secrets or credentials in tasks, comments, or artifacts.
-- Do not change statuses as a worker. A `## Ready for review` comment is the worker-to-taskmaster handoff signal.
-- Do not treat **Done** as deletion; retain completed work unless the user explicitly requests removal.
+Authorized DELETE requests use `{"actor":"your-unique-identity"}` with the same write headers. URL-encode artifact paths when constructing requests.
+
+## Artifacts
+
+Create self-contained HTML in the project's `artifacts/` directory, optionally in subdirectories. Do not store HTML report content in task descriptions, comments, or SQLite. Discover the file through `GET /api/artifacts` and include its returned stable URL in a task comment, for example `[Report](/artifacts/view/deployment-report.html)`.
+
+Only non-hidden regular `.html` and `.htm` files are listed. Symbolic links and path traversal are rejected. Reports larger than 10 MiB cannot be served. Sandboxed reports support inline CSS/JavaScript and data/blob images. Network calls, forms, plugins, top navigation, and taskboard API access are blocked. Do not put credentials or secrets in tasks, comments, or artifacts.
+
+## Implementation References
+
+Consult `taskboard.py` for validation, accepted fields, routes, and concurrency behavior; `configuration.py` and `taskboard.ini` for settings; and `tests/test_taskboard.py` for end-to-end API examples. Browser behavior lives in `static/index.html` and `static/app.js`.
+
+For service diagnosis, inspect the installed `agent-taskboard` systemd unit and logs; `systemd/agent-taskboard.service` is only the installation template. Check service health before diagnosing API failures.

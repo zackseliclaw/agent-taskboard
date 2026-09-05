@@ -5,174 +5,96 @@ A dependency-free local Kanban board for coordinating work between humans and AI
 ## Layout
 
 - Application: `taskboard.py`
+- Configuration: `taskboard.ini` — display name, server host/port, database path, and model overrides by ambiguity level. Edit this file and restart the service; see [Configuration](#configuration) for defaults and overrides.
 - SQLite database: `data/taskboard.db`
 - Artifact files: `artifacts/`
 - Systemd unit template: `systemd/agent-taskboard.service`
-- Site: `http://localhost:7778/`
 
-The lanes are **Backlog**, **Ready**, **In progress**, **Review**, and **Done**. Every task has a stable URL such as `/tasks/17`. Task descriptions and comments support Markdown, including automatic links for bare HTTP(S) URLs. Web comments are always authored as the configured display name (default `User`) and type `human`; agents identify themselves through the API. Comments can be edited inline from their ellipsis menu. Assignment is intentionally absent: an agent atomically claims a task while working on it and releases the claim when handing it off.
+The lanes are **Backlog**, **Ready**, **In progress**, **Review**, and **Done**. Every task has a stable URL such as `/tasks/17`. Task descriptions and comments support Markdown, including automatic links for bare HTTP(S) URLs. Web comments use the configured display name (default `User`). Comments can be edited inline from their ellipsis menu. Task cards show the current claim holder.
 
-## Service operation
+## Installation and setup
+
+You need Python 3.7 or newer. There are no Python packages to install. Running the board as a background service also requires Linux with systemd and sudo access.
+
+1. Clone or download this repository and open its directory.
+2. Edit `taskboard.ini`: set your display name, listening address and port, and any model overrides you want. See [Configuration](#configuration) for details.
+3. Start the board using one of the options below. The database and artifacts directory are created automatically on first startup.
+
+To try it in your terminal:
 
 ```bash
-sudo /path/to/agent-taskboard/install-service.sh
+python3 taskboard.py
+```
+
+Leave the terminal running; press Ctrl+C to stop. Open `http://localhost:7778` in your browser, substituting your configured port. If the board runs on another machine, use that machine's address and configure network access appropriately.
+
+To install it as a background service that starts at boot:
+
+```bash
+sudo ./install-service.sh
 systemctl status agent-taskboard
+```
+
+The installer derives the project directory from its own location and runs the service as the invoking user. You can explicitly set `TASKBOARD_USER` and `TASKBOARD_GROUP` when installing. Rerunning the installer updates the service unit and restarts the board without deleting its data.
+
+After changing configuration, restart the service. To investigate startup problems, read its logs:
+
+```bash
+sudo systemctl restart agent-taskboard
 journalctl -u agent-taskboard -f
 ```
 
-The installer can be launched from any current directory. It derives the project
-root from the script location and runs the service as the invoking user (or as
-`TASKBOARD_USER`/`TASKBOARD_GROUP` when explicitly set).
+### Agent installation and setup
+
+If you're an agent setting this up, complete all of the following. `install-service.sh` installs only the board's systemd service; installing skills and scheduling the overseer are separate setup steps.
+
+1. **Start and verify the board.** Check the Python version and whether the service already exists, preserve existing configuration and data, and follow the setup steps above using the user's requested settings. Use the service installer when a persistent systemd service is wanted; use the terminal command for a foreground run. Verify the configured URL responds at `/api/health`.
+2. **Install the bundled skills into your own persistent skill library.** Install every skill directory in `~/agent-taskboard/skills` (or `skills/` under the actual checkout) using your agent runner's supported skill installation mechanism. This includes both [agent-taskboard](skills/agent-taskboard/SKILL.md), for operating the board, and [taskboard-overseer-cron](skills/taskboard-overseer-cron/SKILL.md), for scheduled oversight. Install the complete directories so supporting files are retained. Reading the skills in the current conversation is not sufficient: verify that future sessions and scheduled agent runs can discover and load both skills. Reuse or update existing registrations for this checkout rather than creating duplicates, and preserve unrelated skills. Record the absolute checkout path and effective board URL in persistent agent configuration. When loading an installed skill, use that checkout as the repository root; a copied skill's installation directory is not the repository, and symlinks must be resolved to their source before deriving the root.
+3. **Create and enable an hourly overseer cron job.** Use your agent runner's persistent scheduler to create a job named `taskboard-overseer` for this checkout. Set its cron expression to `0 * * * *` (once every hour, at minute zero), or the scheduler's equivalent hourly recurrence. Inspect existing jobs first and update the matching job instead of creating a duplicate. The job must launch an agent run that loads both installed skills and follows the overseer workflow; an HTTP health check alone does not perform oversight. Give the run the absolute checkout path, effective board URL, and access to the worker state and delegation tools needed by the overseer. Use this prompt, replacing the placeholders with the actual values:
+
+   ```text
+   Perform the hourly Agent Taskboard overseer sweep.
+   Repository root: <absolute checkout path>
+   Load the installed agent-taskboard and taskboard-overseer-cron skills.
+   Use the repository root above for configuration, artifacts, and implementation references.
+   Follow taskboard-overseer-cron, using agent-taskboard for API requests,
+   coordination rules, and model routing. Report actions or blockers as directed
+   by the overseer skill
+   ```
+
+4. **Verify and report setup.** Read back the saved job and confirm it is enabled, runs hourly, contains the correct prompt and checkout context, and has a next run time. Report the browser URL, how the board is running, the installed skill locations, and the overseer job identifier, schedule, timezone, and next run. If your runner cannot persistently install skills or schedule agent runs, report that specific setup step as incomplete and explain what capability is missing.
 
 ## Configuration
 
-Requires Python 3.11 or newer (TOML is read with the built-in `tomllib` module). The committed `taskboard.toml` is the actual configuration file; edit it directly and restart the service. It is loaded from the project directory regardless of the launch directory. Missing files or settings use defaults; invalid settings and unknown keys stop startup with a clear error.
+Requires Python 3.7 or newer (config file uses the built-in `configparser` module). The committed `taskboard.ini` is the actual configuration file; edit it directly and restart the service. It is loaded from the project directory regardless of the launch directory. Missing files or settings use defaults; invalid settings and unknown keys stop startup with a clear error.
 
-| Setting | Default | Purpose |
-|---|---|---|
-| `identity.display_name` | `"User"` | Author/editor name for browser actions; not authentication |
-| `server.host` | `"127.0.0.1"` | Listening address; use `"0.0.0.0"` for network access |
-| `server.port` | `7778` | Listening port |
-| `storage.database` | `"data/taskboard.db"` | Database path |
-| `models.low`, `models.medium`, `models.high`, `models.very_high` | `""` | Model overrides for your agent runner; empty means inherit its default |
+See [taskboard.ini](taskboard.ini) for the available settings. Write values without quotes. Use whole-line `#` or `;` comments; inline comment characters are treated as part of the value.
+
+Each task has an ambiguity level: **Low**, **Medium**, **High**, or **Very high**. The `[models]` settings (`low`, `medium`, `high`, and `very_high`) map those levels to model identifiers understood by your agent runner. For example, setting `high = provider/model-name` tells an agent following the taskboard skill to use that model when delegating a High task. The board stores the level; it does not launch models itself.
+
+A blank value (`low =`, for example) means **no model override**: the agent inherits the runner's default model without asking you to choose one. It does not mean no model is used or that work is skipped. If every entry is blank, all four levels inherit the runner's default. Changing the mapping affects future delegations after a service restart; it does not change task levels or models already running.
 
 Relative database paths resolve against the project directory. Generated artifacts always use the project's `artifacts/` directory; this path is not configurable. Existing comment authors and task history are preserved when the display name changes.
 
-Precedence is **CLI → environment → TOML → defaults**. Overrides are `--host` / `TASKBOARD_HOST`, `--port` / `TASKBOARD_PORT`, `--db` / `TASKBOARD_DB`, and `--display-name` / `TASKBOARD_DISPLAY_NAME`. Environment settings for systemd belong in a service override, not merely your interactive shell.
+Precedence is **CLI → environment → INI → defaults**. Overrides are `--host` / `TASKBOARD_HOST`, `--port` / `TASKBOARD_PORT`, `--db` / `TASKBOARD_DB`, and `--display-name` / `TASKBOARD_DISPLAY_NAME`. Environment settings for systemd belong in a service override, not merely your interactive shell.
 
-`GET /api/config` exposes effective `identity` and `models` settings alongside board options. The browser uses the configured name; agents read the model mapping there before dispatch. This endpoint is public: do not put credentials in model identifiers or the committed TOML.
+Configuration is publicly readable by clients; do not put credentials in model identifiers or the committed INI.
 
 New service installations read host and port from configuration. Existing installations with explicit `ExecStart` arguments retain those overrides until the unit is updated. If changing storage locations, ensure the service user can write them and update the unit's `ReadWriteDirectories` accordingly.
 
-## Coordination workflow
+## Using the board
 
-The board has two coordination roles:
+Create tasks with a title, Markdown description, ambiguity level, and optional labels. Move cards between Backlog, Ready, In progress, Review, and Done. Open a card to edit it, read comments, or copy its stable URL.
 
-- **Taskmaster:** creates and decomposes work, decides ambiguity, dispatches task URLs to workers, reviews results, and is the only role that changes task statuses.
-- **Worker agent:** claims work under its own identity, performs it, and communicates progress, blockers, and outputs through comments. A worker does not change task status or impersonate another agent's claim.
+Claims show who is currently working on a task. The task page includes controls to claim work or release a stale claim. Deleting a task permanently removes its comments and activity too.
 
-Authoritative lifecycle:
-
-1. The taskmaster creates or refines a task in **Backlog**. The Markdown description contains all context, constraints, expected results, and relevant URLs.
-2. When the task is executable, the taskmaster moves it to **Ready** and dispatches its stable `/tasks/{id}` URL to a worker agent.
-3. The worker reads the current task, atomically claims it using its own agent identity, and adds a short start comment. It never claims on behalf of another agent.
-4. The taskmaster observes the claim and moves the task to **In progress**. Only the taskmaster changes status or ambiguity.
-5. The worker does the work and adds Markdown comments for progress or blockers. HTML outputs go in the artifacts directory; the worker puts stable artifact URLs in comments rather than storing artifact content in SQLite.
-6. When finished, the worker adds a `## Ready for review` comment with a result summary, validation evidence, and output URLs. It keeps the claim while review is pending.
-7. The taskmaster moves the task to **Review** and checks the deliverables:
-   - If changes are needed, it comments with actionable feedback and moves the task back to **In progress**, preserving the worker's claim.
-   - If accepted, it comments with the review outcome, moves the task to **Done**, and force-releases the claim.
-8. Agents never delete tasks, comments, or artifacts unless the user explicitly directs that deletion. Normal completion uses **Done**, not deletion.
-
-The claim is the record of which agent is actively responsible; there is intentionally no separate assignee field.
-
-## Agent API
-
-Writes require JSON and the `X-Taskboard-Client: 1` header. This blocks browser cross-origin form writes; it is not authentication.
-
-### Create a task
-
-```bash
-curl -sS http://localhost:7778/api/tasks \
-  -H 'Content-Type: application/json' \
-  -H 'X-Taskboard-Client: 1' \
-  -d '{
-    "title": "Investigate a failed deployment",
-    "description": "# Context\n\nFind the host-level root cause.\n\n## Completion\n\nDocument the failure and recommended fix.",
-    "status": "ready",
-    "ambiguity": "high",
-    "labels": ["deployment", "investigation"],
-    "actor": "taskmaster"
-  }'
-```
-
-The response includes a stable `url`, for example `/tasks/1`. New tasks require `ambiguity`: `low`, `medium`, `high`, or `very_high`. Existing unassessed tasks have `ambiguity: null`; select a level when assessing them. Model routing comes from `[models]` in `taskboard.toml`; `skills/agent-taskboard/SKILL.md` describes how agents use it.
-
-### Claim and release
-
-Claiming is exclusive and atomic. Repeating a claim by the same agent is idempotent; another agent receives HTTP 409.
-
-```bash
-curl -sS -X POST http://localhost:7778/api/tasks/1/claim \
-  -H 'Content-Type: application/json' \
-  -H 'X-Taskboard-Client: 1' \
-  -d '{"agent":"worker-1","actor":"worker-1"}'
-```
-
-The claiming agent releases the task with:
-
-```bash
-curl -sS -X POST http://localhost:7778/api/tasks/1/release \
-  -H 'Content-Type: application/json' \
-  -H 'X-Taskboard-Client: 1' \
-  -d '{"agent":"worker-1","actor":"worker-1"}'
-```
-
-The web UI can force-release a stale claim. Agents should not use `force` during normal coordination.
-
-### Update a task
-
-Include the current `version` to reject stale writes:
-
-```bash
-curl -sS -X PATCH http://localhost:7778/api/tasks/1 \
-  -H 'Content-Type: application/json' \
-  -H 'X-Taskboard-Client: 1' \
-  -d '{"status":"in_progress","version":2,"actor":"worker-1"}'
-```
-
-### Add comments
-
-Both humans and agents can add Markdown comments:
-
-```bash
-curl -sS -X POST http://localhost:7778/api/tasks/1/comments \
-  -H 'Content-Type: application/json' \
-  -H 'X-Taskboard-Client: 1' \
-  -d '{
-    "author":"worker-1",
-    "author_type":"agent",
-    "body":"Investigation complete. See [the report](/artifacts/view/deployment-report.html)."
-  }'
-```
-
-Use `author_type` value `human` or `agent`.
-
-### Endpoints
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/health` | Health and task count |
-| GET, POST | `/api/tasks` | List or create tasks |
-| GET, PATCH, DELETE | `/api/tasks/{id}` | Read, update, or permanently delete a task |
-| POST | `/api/tasks/{id}/claim` | Atomically claim a task |
-| POST | `/api/tasks/{id}/release` | Release an agent claim |
-| GET, POST | `/api/tasks/{id}/comments` | List or add Markdown comments |
-| PATCH, DELETE | `/api/comments/{id}` | Edit or permanently delete a Markdown comment |
-| GET | `/api/tasks/{id}/activity` | Latest task activity |
-| GET | `/api/artifacts` | Discover HTML artifacts on disk |
-| DELETE | `/api/artifacts/{path}` | Permanently delete an artifact file |
-| GET | `/artifacts/view/{path}` | Open a stable sandboxed artifact URL |
-
-Deletion is permanent and cascades to comments and activity. The UI requires confirmation.
+Agent integration instructions are in [the taskboard skill](skills/agent-taskboard/SKILL.md).
 
 ## Artifacts
 
-Agents create self-contained HTML under `artifacts/`, including nested directories. Refresh the Artifacts page and each file appears as a link to a stable URL. Refer to it from task Markdown or a comment:
-
-```markdown
-## Results
-
-See the [deployment report](/artifacts/view/deployment-report.html).
-```
+Place self-contained HTML reports in `artifacts/`, including subdirectories, then refresh the Artifacts page. Open a report or copy its stable link into a task description or comment.
 
 Only non-hidden `.html` and `.htm` regular files are listed. Symbolic links and path traversal are rejected. Artifacts are served with a restrictive CSP and browser sandbox: inline CSS, inline JavaScript, data images, and blob images work, while network calls, forms, plugins, top navigation, and taskboard API access are blocked.
-
-## Database backups
-
-Schema upgrades run automatically on startup, creating a timestamped SQLite backup beside the database before migrating existing tasks. Task IDs, comments, claims, and activity history are preserved.
-
-SQLite runs in WAL mode. For subsequent live backups, use Python's SQLite backup API or stop the service before copying the database.
 
 ## Security
 

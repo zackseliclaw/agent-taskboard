@@ -1,8 +1,8 @@
-"""Load and validate taskboard settings using Python 3.11+ tomllib."""
+"""Load and validate INI settings using Python's built-in configparser."""
 
 import os
 from pathlib import Path
-import tomllib
+import configparser
 
 ROOT = Path(__file__).resolve().parent
 DEFAULTS = {
@@ -14,22 +14,31 @@ DEFAULTS = {
 
 
 def load_config(path=None, overrides=None, environ=None):
-    path = Path(path) if path is not None else ROOT / "taskboard.toml"
+    path = Path(path) if path is not None else ROOT / "taskboard.ini"
     env = os.environ if environ is None else environ
     config = {section: values.copy() for section, values in DEFAULTS.items()}
+    supplied = configparser.ConfigParser(interpolation=None)
+    supplied.optionxform = str
     try:
-        with path.open("rb") as source:
-            supplied = tomllib.load(source)
+        with path.open("r", encoding="utf-8") as source:
+            supplied.read_file(source)
     except FileNotFoundError:
-        supplied = {}
-    except (OSError, tomllib.TOMLDecodeError) as error:
+        pass
+    except (OSError, configparser.Error) as error:
         raise ValueError(f"Cannot read configuration {path}: {error}") from error
-    for section, values in supplied.items():
-        if section not in config or not isinstance(values, dict):
+    if supplied.defaults():
+        raise ValueError("The DEFAULT section is not supported; use named settings sections")
+    for section in supplied.sections():
+        if section not in config:
             raise ValueError(f"Invalid configuration section: {section}")
-        for key, value in values.items():
+        for key, value in supplied.items(section):
             if key not in config[section]:
                 raise ValueError(f"Unknown configuration setting: {section}.{key}")
+            if section == "server" and key == "port":
+                try:
+                    value = int(value)
+                except ValueError as error:
+                    raise ValueError("server.port must be an integer") from error
             config[section][key] = value
     # Validate the file itself, including settings later overridden.
     validate(config)

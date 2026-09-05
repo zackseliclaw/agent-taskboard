@@ -147,13 +147,10 @@ class Taskboard:
             ).fetchone()
             if table is not None:
                 columns = {row["name"] for row in connection.execute("PRAGMA table_info(tasks)")}
-                if "claimed_by" not in columns:
+                if not {"claimed_by", "ambiguity"}.issubset(columns):
                     raise RuntimeError(
                         "Unsupported database schema; start with a fresh taskboard database"
                     )
-                if "ambiguity" not in columns:
-                    from migrations import migrate_ambiguity
-                    migrate_ambiguity(connection, self.db_path)
             connection.executescript(SCHEMA)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
