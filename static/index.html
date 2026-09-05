@@ -30,7 +30,6 @@
       <div class="toolbar">
         <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Search tasks, Markdown, labels, and claims"></label>
         <label><span class="sr-only">Filter by claim state</span><select id="claim-filter"><option value="">All claims</option><option value="unclaimed">Unclaimed</option><option value="claimed">Claimed</option></select></label>
-        <label class="checkbox-filter"><input id="include-archived" type="checkbox"> Include archived</label>
         <div id="board-summary" class="summary"></div>
       </div>
       <div id="board" class="board" aria-live="polite"></div>
@@ -55,7 +54,6 @@
           <div class="task-actions">
             <button id="copy-task-link" class="button secondary">Copy URL</button>
             <button id="edit-task" class="button secondary">Edit</button>
-            <button id="archive-task" class="button secondary">Archive task</button>
             <button id="delete-task" class="button danger">Delete task</button>
           </div>
         </div>
@@ -108,7 +106,7 @@
       <div class="form-grid">
         <label class="full"><span>Title</span><input id="task-title" maxlength="300" required placeholder="What needs to be done?"></label>
         <label><span>Status</span><select id="task-status"></select></label>
-        <label><span>Priority</span><select id="task-priority"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
+        <label><span>Ambiguity</span><select id="task-ambiguity" required><option value="" disabled selected>Select ambiguity</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="very_high">Very high</option></select></label>
         <label class="full"><span>Labels</span><input id="task-labels" placeholder="backend, investigation, ai"></label>
         <label class="full"><span>Description <small>Markdown supported</small></span><textarea id="task-description" rows="14" placeholder="# Context&#10;&#10;Describe the task, useful links, expected outcome, and anything an agent needs to know."></textarea></label>
       </div>

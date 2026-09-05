@@ -49,6 +49,7 @@ class TaskboardIntegrationTest(unittest.TestCase):
             "POST",
             {
                 "title": title,
+                "ambiguity": "medium",
                 "description": "# Context\n\nTrace the **event queue**.",
                 "labels": ["controller", "investigation"],
                 "actor": "test",
@@ -117,8 +118,8 @@ class TaskboardIntegrationTest(unittest.TestCase):
     def test_human_and_agent_markdown_comments(self):
         task = self.create_task()
         for author, author_type, body in (
-            ("Zack", "human", "Please check the **logs**."),
-            ("elb-cp", "agent", "Done. See [report](/artifacts/view/report.html)."),
+            ("User", "human", "Please check the **logs**."),
+            ("worker-1", "agent", "Done. See [report](/artifacts/view/report.html)."),
         ):
             status, _, payload = self.request(
                 f"/api/tasks/{task['id']}/comments",
@@ -134,11 +135,11 @@ class TaskboardIntegrationTest(unittest.TestCase):
         _, _, edited = self.request(
             f"/api/comments/{human_comment['id']}",
             "PATCH",
-            {"body": "Updated with bare link https://example.com/report.", "editor": "Zack", "editor_type": "human"},
+            {"body": "Updated with bare link https://example.com/report.", "editor": "User", "editor_type": "human"},
         )
         self.assertEqual("Updated with bare link https://example.com/report.", edited["comment"]["body"])
         _, _, deleted = self.request(
-            f"/api/comments/{human_comment['id']}", "DELETE", {"actor": "Zack"}
+            f"/api/comments/{human_comment['id']}", "DELETE", {"actor": "User"}
         )
         self.assertTrue(deleted["deleted"])
         self.assertEqual(task["id"], deleted["task_id"])
@@ -181,7 +182,7 @@ class TaskboardIntegrationTest(unittest.TestCase):
         self.assertIn("connect-src 'none'", headers["Content-Security-Policy"])
         encoded_path = artifact["path"].replace("/", "%2F")
         status, _, deleted = self.request(
-            f"/api/artifacts/{encoded_path}", "DELETE", {"actor": "Zack"}
+            f"/api/artifacts/{encoded_path}", "DELETE", {"actor": "User"}
         )
         self.assertEqual(200, status)
         self.assertTrue(deleted["deleted"])
@@ -195,59 +196,38 @@ class TaskboardIntegrationTest(unittest.TestCase):
             self.request("/api/tasks", "POST", {"title": "No header"}, client_header=False)
         self.assertEqual(403, forbidden.exception.code)
 
-    def test_archived_tasks_are_filtered_and_archive_is_optimistic_update(self):
-        task = self.create_task("Keep history")
-        _, _, created_archived = self.request(
-            "/api/tasks", "POST", {"title": "Hidden history", "archived": True}
-        )
-        archived = created_archived["task"]
-        self.assertFalse(task["archived"])
-        self.assertTrue(archived["archived"])
-        _, _, listing = self.request("/api/tasks")
-        self.assertEqual([task["id"]], [item["id"] for item in listing["tasks"]])
-        _, _, included = self.request("/api/tasks?include_archived=true")
-        self.assertEqual({task["id"], archived["id"]}, {item["id"] for item in included["tasks"]})
-        _, _, updated = self.request(
-            f"/api/tasks/{task['id']}", "PATCH",
-            {"archived": True, "version": task["version"], "actor": "test"},
-        )
-        self.assertTrue(updated["task"]["archived"])
-        self.assertEqual(task["version"] + 1, updated["task"]["version"])
-        with self.assertRaises(HTTPError) as conflict:
-            self.request(f"/api/tasks/{task['id']}", "PATCH", {"archived": False, "version": task["version"]})
-        self.assertEqual(409, conflict.exception.code)
-        _, _, activity = self.request(f"/api/tasks/{task['id']}/activity")
-        self.assertEqual("updated", activity["activity"][0]["action"])
-        self.assertEqual({"archived": 1}, activity["activity"][0]["details"])
-        _, _, restored = self.request(
-            f"/api/tasks/{task['id']}", "PATCH",
-            {"archived": False, "version": updated["task"]["version"]},
-        )
-        self.assertFalse(restored["task"]["archived"])
 
-    def test_archived_column_migrates_without_losing_existing_data(self):
-        db_path = Path(self.temp.name) / "legacy.db"
-        now = "2026-01-01T00:00:00Z"
-        connection = sqlite3.connect(db_path)
-        connection.executescript("""
-            CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
-              description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'backlog',
-              priority TEXT NOT NULL DEFAULT 'medium', labels_json TEXT NOT NULL DEFAULT '[]',
-              position REAL NOT NULL DEFAULT 1024, claimed_by TEXT NOT NULL DEFAULT '',
-              claimed_at TEXT, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL);
-            CREATE TABLE task_activity (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
-              action TEXT NOT NULL, actor TEXT NOT NULL DEFAULT '', details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
-            CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
-              author TEXT NOT NULL, author_type TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-        """)
-        connection.execute("INSERT INTO tasks(title, created_at, updated_at) VALUES (?, ?, ?)", ("Legacy", now, now))
-        connection.commit(); connection.close()
-        migrated = Taskboard(db_path, Path(self.temp.name) / "legacy-artifacts")
-        task = migrated.get_task(1)
-        self.assertFalse(task["archived"])
-        self.assertEqual("Legacy", task["title"])
-        self.assertIn("archived", {row[1] for row in migrated.connect().execute("PRAGMA table_info(tasks)")})
+    def test_ambiguity_validation_and_updates(self):
+        for level in ("low", "medium", "high", "very_high"):
+            _, _, payload = self.request("/api/tasks", "POST", {"title": level, "ambiguity": level})
+            self.assertEqual(level, payload["task"]["ambiguity"])
+            self.assertNotIn("priority", payload["task"])
+            self.assertNotIn("archived", payload["task"])
+        for invalid in (None, "", "urgent", 42, []):
+            with self.assertRaises(HTTPError) as error:
+                self.request("/api/tasks", "POST", {"title": "Invalid", "ambiguity": invalid})
+            self.assertEqual(400, error.exception.code)
+        task = self.create_task()
+        _, _, payload = self.request(f"/api/tasks/{task['id']}", "PATCH",
+                                     {"ambiguity": "very_high", "version": task["version"]})
+        self.assertEqual("very_high", payload["task"]["ambiguity"])
+        with self.assertRaises(HTTPError) as error:
+            self.request(f"/api/tasks/{task['id']}", "PATCH",
+                         {"ambiguity": "low", "version": task["version"]})
+        self.assertEqual(409, error.exception.code)
+        for field, value in (("priority", "high"), ("archived", True)):
+            with self.assertRaises(HTTPError) as error:
+                self.request(f"/api/tasks/{task['id']}", "PATCH", {field: value})
+            self.assertEqual(400, error.exception.code)
+        _, _, config = self.request("/api/config")
+        self.assertEqual(["low", "medium", "high", "very_high"], config["ambiguities"])
+        self.app.config["identity"]["display_name"] = "Reviewer"
+        self.app.config["models"]["high"] = "test-model"
+        _, _, config = self.request("/api/config")
+        self.assertEqual("Reviewer", config["identity"]["display_name"])
+        self.assertEqual("test-model", config["models"]["high"])
+        self.assertNotIn("storage", config)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ Type=simple
 User=__SERVICE_USER__
 Group=__SERVICE_GROUP__
 WorkingDirectory=__PROJECT_ROOT__
-ExecStart=__PYTHON__ __PROJECT_ROOT__/taskboard.py --host 0.0.0.0 --port 7778
+ExecStart=__PYTHON__ __PROJECT_ROOT__/taskboard.py
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1

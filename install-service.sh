@@ -64,7 +64,7 @@ awk \
     /^User=/ { print "User=" service_user; next }
     /^Group=/ { print "Group=" service_group; next }
     /^WorkingDirectory=/ { print "WorkingDirectory=" project_root; next }
-    /^ExecStart=/ { print "ExecStart=" python " " project_root "/taskboard.py --host 0.0.0.0 --port 7778"; next }
+    /^ExecStart=/ { print "ExecStart=" python " " project_root "/taskboard.py"; next }
     /^ReadWriteDirectories=__DATA_DIR__$/ { print "ReadWriteDirectories=" data_dir; next }
     /^ReadWriteDirectories=__ARTIFACTS_DIR__$/ { print "ReadWriteDirectories=" artifacts_dir; next }
     { print }

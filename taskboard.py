@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from configuration import load_config
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "taskboard.db"
@@ -31,11 +32,11 @@ STATUS_LABELS = {
     "review": "Review",
     "done": "Done",
 }
-PRIORITIES = ("low", "medium", "high", "urgent")
+AMBIGUITIES = ("low", "medium", "high", "very_high")
 AUTHOR_TYPES = ("human", "agent")
 MAX_BODY_BYTES = 1_048_576
 MAX_ARTIFACT_BYTES = 10 * 1_048_576
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -44,13 +45,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'backlog'
         CHECK(status IN ('backlog', 'ready', 'in_progress', 'review', 'done')),
-    priority TEXT NOT NULL DEFAULT 'medium'
-        CHECK(priority IN ('low', 'medium', 'high', 'urgent')),
+    ambiguity TEXT
+        CHECK(ambiguity IN ('low', 'medium', 'high', 'very_high')),
     labels_json TEXT NOT NULL DEFAULT '[]',
     position REAL NOT NULL DEFAULT 1024,
     claimed_by TEXT NOT NULL DEFAULT '',
     claimed_at TEXT,
-    archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -124,7 +124,8 @@ def clean_actor(value: Any) -> str:
 
 
 class Taskboard:
-    def __init__(self, db_path: Path, artifacts_dir: Path):
+    def __init__(self, db_path: Path, artifacts_dir: Path, config=None):
+        self.config = config if config is not None else load_config()
         self.db_path = db_path.expanduser().resolve()
         self.artifacts_dir = artifacts_dir.expanduser().resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,8 +151,9 @@ class Taskboard:
                     raise RuntimeError(
                         "Unsupported database schema; start with a fresh taskboard database"
                     )
-                if "archived" not in columns:
-                    connection.execute("ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))")
+                if "ambiguity" not in columns:
+                    from migrations import migrate_ambiguity
+                    migrate_ambiguity(connection, self.db_path)
             connection.executescript(SCHEMA)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
@@ -161,7 +163,7 @@ class Taskboard:
     def health(self) -> Dict[str, Any]:
         with self.connect() as connection:
             connection.execute("SELECT 1").fetchone()
-            count = connection.execute("SELECT count(*) FROM tasks WHERE archived = 0").fetchone()[0]
+            count = connection.execute("SELECT count(*) FROM tasks").fetchone()[0]
         return {"status": "ok", "database": "ok", "active_tasks": count, "time": utc_now()}
 
     def _artifact_path(self, raw_path: Any, require_exists: bool = False) -> Path:
@@ -236,7 +238,6 @@ class Taskboard:
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> Dict[str, Any]:
         task = dict(row)
-        task["archived"] = bool(task["archived"])
         try:
             task["labels"] = json.loads(task.pop("labels_json"))
         except (TypeError, json.JSONDecodeError):
@@ -249,11 +250,6 @@ class Taskboard:
         parameters: List[Any] = []
         status = query.get("status", [""])[0]
         claim = query.get("claim", [""])[0]
-        include_archived = query.get("include_archived", [""])[0].lower()
-        if include_archived not in {"", "0", "1", "true", "false", "yes", "no"}:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "include_archived must be true or false")
-        if include_archived not in {"1", "true", "yes"}:
-            clauses.append("t.archived = 0")
         search = query.get("q", [""])[0].strip()
         if status:
             if status not in STATUSES:
@@ -314,18 +310,13 @@ class Taskboard:
             if status not in STATUSES:
                 raise ApiError(HTTPStatus.BAD_REQUEST, f"status must be one of {', '.join(STATUSES)}")
             values["status"] = status
-        if creating or "priority" in body:
-            priority = body.get("priority", "medium")
-            if priority not in PRIORITIES:
-                raise ApiError(HTTPStatus.BAD_REQUEST, f"priority must be one of {', '.join(PRIORITIES)}")
-            values["priority"] = priority
+        if creating or "ambiguity" in body:
+            ambiguity = body.get("ambiguity")
+            if ambiguity not in AMBIGUITIES:
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"ambiguity must be one of {', '.join(AMBIGUITIES)}")
+            values["ambiguity"] = ambiguity
         if creating or "labels" in body:
             values["labels_json"] = json.dumps(clean_labels(body.get("labels")), separators=(",", ":"))
-        if creating or "archived" in body:
-            archived = body.get("archived", False)
-            if not isinstance(archived, bool):
-                raise ApiError(HTTPStatus.BAD_REQUEST, "archived must be a boolean")
-            values["archived"] = int(archived)
         if "position" in body:
             try:
                 position = float(body["position"])
@@ -337,7 +328,7 @@ class Taskboard:
         return values
 
     def create_task(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        allowed = {"title", "description", "status", "priority", "labels", "position", "archived", "actor"}
+        allowed = {"title", "description", "status", "ambiguity", "labels", "position", "actor"}
         unknown = set(body) - allowed
         if unknown:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"unknown fields: {', '.join(sorted(unknown))}")
@@ -361,7 +352,7 @@ class Taskboard:
         return self.get_task(task_id)
 
     def update_task(self, task_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
-        allowed = {"title", "description", "status", "priority", "labels", "position", "archived", "actor", "version"}
+        allowed = {"title", "description", "status", "ambiguity", "labels", "position", "actor", "version"}
         unknown = set(body) - allowed
         if unknown:
             raise ApiError(HTTPStatus.BAD_REQUEST, f"unknown fields: {', '.join(sorted(unknown))}")
@@ -635,8 +626,10 @@ class TaskboardHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {
                         "statuses": [{"id": item, "label": STATUS_LABELS[item]} for item in STATUSES],
-                        "priorities": PRIORITIES,
+                        "ambiguities": AMBIGUITIES,
                         "author_types": AUTHOR_TYPES,
+                        "identity": self.server.app.config["identity"],
+                        "models": self.server.app.config["models"],
                     },
                 )
                 return
@@ -787,19 +780,29 @@ class TaskboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default=os.environ.get("TASKBOARD_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("TASKBOARD_PORT", "7778")))
-    parser.add_argument("--db", type=Path, default=Path(os.environ.get("TASKBOARD_DB", DEFAULT_DB)))
-    parser.add_argument("--artifacts", type=Path, default=Path(os.environ.get("TASKBOARD_ARTIFACTS", DEFAULT_ARTIFACTS)))
+    parser.add_argument("--host")
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--display-name")
     parser.add_argument("--init-only", action="store_true", help="initialize the database and exit")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    try:
+        args.config = load_config(overrides={
+            key: getattr(args, key) for key in ("host", "port", "db", "display_name")
+        })
+    except ValueError as error:
+        parser.error(str(error))
+    args.host = args.config["server"]["host"]
+    args.port = args.config["server"]["port"]
+    args.db = args.config["storage"]["database"]
+    return args
 
 
 def main() -> int:
     args = parse_args()
-    app = Taskboard(args.db, args.artifacts)
+    app = Taskboard(args.db, DEFAULT_ARTIFACTS, args.config)
     if args.init_only:
         print(f"Initialized {app.db_path}")
         return 0

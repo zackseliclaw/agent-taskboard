@@ -1,11 +1,12 @@
 (() => {
   "use strict";
 
-  const state = { tasks: [], artifacts: [], statuses: [], draggedId: null, currentTask: null, comments: [], editingCommentId: null };
+  const state = { displayName: "User", tasks: [], artifacts: [], statuses: [], draggedId: null, currentTask: null, comments: [], editingCommentId: null };
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => [...document.querySelectorAll(selector)];
-  const board = $("#board");
-  const dialog = $("#task-dialog");
+  const hasDocument = typeof document !== "undefined";
+  const board = hasDocument ? $("#board") : null;
+  const dialog = hasDocument ? $("#task-dialog") : null;
 
   async function api(path, options = {}) {
     const headers = { Accept: "application/json", ...(options.headers || {}) };
@@ -71,6 +72,71 @@
     return value;
   }
 
+  function splitTableRow(source) {
+    let line = source.trim();
+    if (line.startsWith("|")) line = line.slice(1);
+    const cells = [];
+    let cell = "";
+    let codeFenceLength = 0;
+    for (let index = 0; index < line.length; index += 1) {
+      const character = line[index];
+      if (character === "\\" && line[index + 1] === "|") {
+        cell += "|";
+        index += 1;
+        continue;
+      }
+      if (character === "`") {
+        let end = index + 1;
+        while (line[end] === "`") end += 1;
+        const runLength = end - index;
+        if (!codeFenceLength) codeFenceLength = runLength;
+        else if (codeFenceLength === runLength) codeFenceLength = 0;
+        cell += line.slice(index, end);
+        index = end - 1;
+        continue;
+      }
+      if (character === "|" && !codeFenceLength) {
+        cells.push(cell.trim());
+        cell = "";
+        continue;
+      }
+      cell += character;
+    }
+    cells.push(cell.trim());
+    if (cells.length > 1 && cells[cells.length - 1] === "") cells.pop();
+    return cells;
+  }
+
+  function isTableRow(source) {
+    const trimmed = source.trim();
+    if (!trimmed) return false;
+    const cells = splitTableRow(source);
+    return cells.length > 1 || trimmed.startsWith("|") || (trimmed.endsWith("|") && !trimmed.endsWith("\\|"));
+  }
+
+  function parseTableAlignments(source, columnCount) {
+    if (!isTableRow(source)) return null;
+    const cells = splitTableRow(source);
+    if (cells.length !== columnCount) return null;
+    const alignments = [];
+    for (const cell of cells) {
+      const marker = cell.trim();
+      if (!/^:?-{3,}:?$/.test(marker)) return null;
+      const left = marker.startsWith(":");
+      const right = marker.endsWith(":");
+      alignments.push(left && right ? "center" : right ? "right" : left ? "left" : "");
+    }
+    return alignments;
+  }
+
+  function renderTableRow(tag, cells, alignments) {
+    return `<tr>${alignments.map((alignment, index) => {
+      const scope = tag === "th" ? ' scope="col"' : "";
+      const className = alignment ? ` class="align-${alignment}"` : "";
+      return `<${tag}${scope}${className}>${renderInlineMarkdown(cells[index] || "")}</${tag}>`;
+    }).join("")}</tr>`;
+  }
+
   function renderMarkdown(source) {
     if (!source || !source.trim()) return '<p class="empty-copy">No description provided.</p>';
     const lines = source.replace(/\r\n?/g, "\n").split("\n");
@@ -82,7 +148,8 @@
       if (listType) output.push(`</${listType}>`);
       listType = null;
     };
-    for (const line of lines) {
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
       if (/^```/.test(line)) {
         if (inCode) {
           output.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
@@ -101,6 +168,23 @@
         closeList();
         const level = heading[1].length;
         output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+        continue;
+      }
+      const tableHeaders = splitTableRow(line);
+      const tableAlignments = isTableRow(line) && index + 1 < lines.length
+        ? parseTableAlignments(lines[index + 1], tableHeaders.length)
+        : null;
+      if (tableAlignments) {
+        closeList();
+        const bodyRows = [];
+        index += 2;
+        while (index < lines.length && isTableRow(lines[index])) {
+          bodyRows.push(renderTableRow("td", splitTableRow(lines[index]), tableAlignments));
+          index += 1;
+        }
+        index -= 1;
+        const body = bodyRows.length ? `<tbody>${bodyRows.join("")}</tbody>` : "";
+        output.push(`<div class="markdown-table-wrapper"><table><thead>${renderTableRow("th", tableHeaders, tableAlignments)}</thead>${body}</table></div>`);
         continue;
       }
       const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
@@ -122,8 +206,9 @@
     return output.join("\n");
   }
 
-  function plainMarkdown(value) {
-    return value.replace(/```[\s\S]*?```/g, " code ").replace(/[#>*_~`\[\]()!-]/g, " ").replace(/\s+/g, " ").trim();
+  if (typeof module === "object" && module.exports) {
+    module.exports = { renderMarkdown };
+    return;
   }
 
   function initials(value) {
@@ -158,37 +243,18 @@
     });
   }
 
-  async function toggleArchiveTask() {
-    const task = state.currentTask;
-    if (!task) return;
-    const archived = !task.archived;
-    try {
-      const payload = await api(`/api/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ archived, version: task.version, actor: "web-ui" }) });
-      state.currentTask = payload.task;
-      toast(archived ? "Task archived" : "Task restored");
-      await loadTasks();
-      renderTaskDetail();
-    } catch (error) { toast(error.message, true); }
-  }
-
   function buildCard(task) {
     const card = document.createElement("a");
-    card.className = `task-card priority-${task.priority}`;
+    card.className = `task-card ambiguity-${task.ambiguity}`;
     card.href = task.url;
     card.draggable = true;
     card.dataset.id = task.id;
     const top = document.createElement("div"); top.className = "card-top";
     const id = document.createElement("span"); id.className = "task-id"; id.textContent = `TASK-${task.id}`;
-    const priority = document.createElement("span"); priority.className = `priority ${task.priority}`; priority.textContent = task.priority;
-    top.append(id, priority);
+    const ambiguity = document.createElement("span"); ambiguity.className = `ambiguity ${task.ambiguity}`; ambiguity.textContent = task.ambiguity ? task.ambiguity.replaceAll("_", " ") : "Not assessed";
+    top.append(id, ambiguity);
     const title = document.createElement("h3"); title.textContent = task.title;
     card.append(top, title);
-    if (task.description) {
-      const description = document.createElement("div");
-      description.className = "task-description";
-      description.textContent = plainMarkdown(task.description);
-      card.append(description);
-    }
     if (task.labels.length) {
       const labels = document.createElement("div"); labels.className = "labels";
       task.labels.slice(0, 5).forEach((value) => {
@@ -258,7 +324,7 @@
     Object.assign(task, { status, position });
     renderBoard();
     try {
-      const payload = await api(`/api/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ status, position, version: task.version, actor: "web-ui" }) });
+      const payload = await api(`/api/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ status, position, version: task.version, actor: state.displayName }) });
       Object.assign(task, payload.task);
     } catch (error) {
       Object.assign(task, previous);
@@ -269,7 +335,7 @@
 
   function openEditor(task = null) {
     $("#task-form").reset();
-    $("#task-priority").value = "medium";
+    $("#task-ambiguity").value = "";
     $("#task-status").value = "backlog";
     $("#task-id").value = task?.id || "";
     $("#task-version").value = task?.version || "";
@@ -278,7 +344,7 @@
     if (task) {
       $("#task-title").value = task.title;
       $("#task-status").value = task.status;
-      $("#task-priority").value = task.priority;
+      $("#task-ambiguity").value = task.ambiguity || "";
       $("#task-labels").value = task.labels.join(", ");
       $("#task-description").value = task.description;
     }
@@ -292,10 +358,10 @@
     const body = {
       title: $("#task-title").value,
       status: $("#task-status").value,
-      priority: $("#task-priority").value,
+      ambiguity: $("#task-ambiguity").value,
       labels: $("#task-labels").value.split(",").map((item) => item.trim()).filter(Boolean),
       description: $("#task-description").value,
-      actor: "web-ui",
+      actor: state.displayName,
     };
     if (id) body.version = Number($("#task-version").value);
     try {
@@ -311,7 +377,7 @@
     const task = state.currentTask;
     if (!task || !confirm(`Permanently delete TASK-${task.id} and all of its comments?`)) return;
     try {
-      await api(`/api/tasks/${task.id}`, { method: "DELETE", body: JSON.stringify({ actor: "web-ui" }) });
+      await api(`/api/tasks/${task.id}`, { method: "DELETE", body: JSON.stringify({ actor: state.displayName }) });
       state.currentTask = null;
       await loadTasks();
       toast("Task deleted");
@@ -329,10 +395,9 @@
     $("#detail-description").innerHTML = renderMarkdown(task.description);
     const status = state.statuses.find((item) => item.id === task.status)?.label || task.status;
     $("#detail-meta").replaceChildren();
-    [status, `${task.priority} priority`, `Updated ${formatTime(task.updated_at)}`].forEach((value, index) => {
-      const item = document.createElement("span"); item.className = index < 2 ? `meta-pill ${index === 1 ? task.priority : ""}` : "meta-time"; item.textContent = value; $("#detail-meta").append(item);
+    [status, task.ambiguity ? `${task.ambiguity.replaceAll("_", " ")} ambiguity` : "Ambiguity not assessed", `Updated ${formatTime(task.updated_at)}`].forEach((value, index) => {
+      const item = document.createElement("span"); item.className = index < 2 ? `meta-pill ${index === 1 ? task.ambiguity : ""}` : "meta-time"; item.textContent = value; $("#detail-meta").append(item);
     });
-    $("#archive-task").textContent = task.archived ? "Restore task" : "Archive task";
     const labels = $("#detail-labels"); labels.replaceChildren();
     task.labels.forEach((value) => { const label = document.createElement("span"); label.className = "label"; label.textContent = value; labels.append(label); });
     const claimState = $("#claim-state"); claimState.replaceChildren();
@@ -396,7 +461,7 @@
     if (!agent) return;
     localStorage.setItem("taskboard.claim.agent", agent);
     try {
-      const payload = await api(`/api/tasks/${state.currentTask.id}/claim`, { method: "POST", body: JSON.stringify({ agent, actor: "web-ui" }) });
+      const payload = await api(`/api/tasks/${state.currentTask.id}/claim`, { method: "POST", body: JSON.stringify({ agent, actor: state.displayName }) });
       state.currentTask = payload.task;
       toast(`Claimed by ${agent}`);
       await loadTasks();
@@ -407,7 +472,7 @@
   async function releaseCurrentTask() {
     if (!state.currentTask) return;
     try {
-      const payload = await api(`/api/tasks/${state.currentTask.id}/release`, { method: "POST", body: JSON.stringify({ force: true, actor: "web-ui" }) });
+      const payload = await api(`/api/tasks/${state.currentTask.id}/release`, { method: "POST", body: JSON.stringify({ force: true, actor: state.displayName }) });
       state.currentTask = payload.task;
       toast("Claim released");
       await loadTasks();
@@ -461,7 +526,7 @@
     try {
       const payload = await api(`/api/comments/${commentId}`, {
         method: "PATCH",
-        body: JSON.stringify({ body, editor: "Zack", editor_type: "human" }),
+        body: JSON.stringify({ body, editor: state.displayName, editor_type: "human" }),
       });
       const index = state.comments.findIndex((comment) => comment.id === commentId);
       if (index >= 0) state.comments[index] = payload.comment;
@@ -476,7 +541,7 @@
     try {
       await api(`/api/comments/${comment.id}`, {
         method: "DELETE",
-        body: JSON.stringify({ actor: "Zack" }),
+        body: JSON.stringify({ actor: state.displayName }),
       });
       state.comments = state.comments.filter((item) => item.id !== comment.id);
       if (state.editingCommentId === comment.id) state.editingCommentId = null;
@@ -494,7 +559,7 @@
     try {
       const payload = await api(`/api/tasks/${state.currentTask.id}/comments`, {
         method: "POST",
-        body: JSON.stringify({ author: "Zack", author_type: "human", body }),
+        body: JSON.stringify({ author: state.displayName, author_type: "human", body }),
       });
       state.comments.push(payload.comment);
       $("#comment-body").value = "";
@@ -535,7 +600,7 @@
     if (!confirm(`Permanently delete ${artifact.path} from disk?`)) return;
     const encodedPath = artifact.path.split("/").map(encodeURIComponent).join("/");
     try {
-      await api(`/api/artifacts/${encodedPath}`, { method: "DELETE", body: JSON.stringify({ actor: "Zack" }) });
+      await api(`/api/artifacts/${encodedPath}`, { method: "DELETE", body: JSON.stringify({ actor: state.displayName }) });
       if (state.artifacts.some((item) => item.path === artifact.path)) {
         state.artifacts = state.artifacts.filter((item) => item.path !== artifact.path);
         $("#artifact-count").textContent = state.artifacts.length;
@@ -567,7 +632,7 @@
   }
 
   async function loadTasks() {
-    const payload = await api(`/api/tasks${$("#include-archived").checked ? "?include_archived=true" : ""}`);
+    const payload = await api("/api/tasks");
     state.tasks = payload.tasks;
     renderBoard();
   }
@@ -605,12 +670,10 @@
     $("#refresh-artifacts").addEventListener("click", () => loadArtifacts().then(() => toast("Artifacts refreshed")).catch((error) => toast(error.message, true)));
     $("#search").addEventListener("input", renderBoard);
     $("#claim-filter").addEventListener("change", renderBoard);
-    $("#include-archived").addEventListener("change", loadTasks);
     $("#artifact-search").addEventListener("input", renderArtifacts);
     $("#task-form").addEventListener("submit", saveTask);
     $("#edit-task").addEventListener("click", () => state.currentTask && openEditor(state.currentTask));
     $("#delete-task").addEventListener("click", deleteCurrentTask);
-    $("#archive-task").addEventListener("click", toggleArchiveTask);
     $("#claim-form").addEventListener("submit", claimCurrentTask);
     $("#release-claim").addEventListener("click", releaseCurrentTask);
     $("#comment-form").addEventListener("submit", addComment);
@@ -627,6 +690,7 @@
     $("#claim-agent").value = localStorage.getItem("taskboard.claim.agent") || "";
     try {
       const config = await api("/api/config");
+      state.displayName = config.identity.display_name;
       state.statuses = config.statuses;
       $("#task-status").replaceChildren(...state.statuses.map((status) => new Option(status.label, status.id)));
       await refresh();
