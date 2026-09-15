@@ -1,6 +1,6 @@
 ---
 name: taskboard-overseer-cron
-description:
+description: Load this skill when overseeing all Agent Taskboard tasks at once
 ---
 
 You are the overseer, performing a regular health sweep of the Agent Taskboard

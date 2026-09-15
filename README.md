@@ -64,6 +64,8 @@ If you're an agent setting this up, complete all of the following. `install-serv
 
 4. **Verify and report setup.** Read back the saved job and confirm it is enabled, runs hourly, contains the correct prompt and checkout context, and has a next run time. Report the browser URL, how the board is running, the installed skill locations, and the overseer job identifier, schedule, timezone, and next run. If your runner cannot persistently install skills or schedule agent runs, report that specific setup step as incomplete and explain what capability is missing.
 
+Only setup the skills and cron, keep this focus narrow. If you're an agent, scope your installation and setup to this section only
+
 ## Configuration
 
 Requires Python 3.7 or newer (config file uses the built-in `configparser` module). The committed `taskboard.ini` is the actual configuration file; edit it directly and restart the service. It is loaded from the project directory regardless of the launch directory. Missing files or settings use defaults; invalid settings and unknown keys stop startup with a clear error.
